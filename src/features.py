@@ -158,8 +158,99 @@ def add_rest_days_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def add_elo_features(
+    df: pd.DataFrame,
+    initial_rating: float = 1500.0,
+    new_team_rating: float = 1300.0,
+    home_advantage: float = 100.0,
+    k_factor: float = 20.0,
+) -> pd.DataFrame:
+    """
+    Beregn Elo-rating for hvert lag og legg til to features:
+      - home_elo_pre  (hjemmelaget sin rating RETT FØR kampen)
+      - away_elo_pre  (bortelaget sin rating RETT FØR kampen)
+
+    Elo holdes separat per liga. Lag som dukker opp første gang får
+    `new_team_rating` som startverdi (lav, fordi nyopprykkede lag
+    historisk gjør det dårlig).
+
+    Vi går gjennom kamper kronologisk og oppdaterer ratingen etter
+    hver kamp. Featurene som lagres er ALLTID rating før kampen,
+    aldri etter – så det er ingen lekkasje.
+    """
+    df = df.sort_values("date").reset_index(drop=True).copy()
+
+    # Ratings holdes som dict per (league, team)
+    ratings: dict[tuple[str, str], float] = {}
+
+    home_elo_pre = []
+    away_elo_pre = []
+
+    # Kjapt oppslag: hvilke lag har vi sett før per liga? Brukes til 
+    # å bestemme startrating. Det første laget får `initial_rating`
+    # for at det skal være en "etablert baseline"; etterfølgende nye 
+    # lag i samme liga får `new_team_rating`.
+    seen_in_league: dict[str, set[str]] = {}
+
+    def get_rating(league: str, team: str) -> float:
+        key = (league, team)
+        if key in ratings:
+            return ratings[key]
+        # Nytt lag i denne ligaen
+        if league not in seen_in_league:
+            seen_in_league[league] = set()
+        if not seen_in_league[league]:
+            # Aller første lag i ligaen i datasettet – bruk normal start
+            r = initial_rating
+        else:
+            r = new_team_rating
+        ratings[key] = r
+        seen_in_league[league].add(team)
+        return r
+
+    # Iterer over kamper i kronologisk rekkefølge
+    for _, row in df.iterrows():
+        league = row["league"]
+        home = row["home_team"]
+        away = row["away_team"]
+
+        r_home = get_rating(league, home)
+        r_away = get_rating(league, away)
+
+        # Lagre PRE-rating som feature
+        home_elo_pre.append(r_home)
+        away_elo_pre.append(r_away)
+
+        # Beregn forventet resultat med hjemmefordel
+        exp_home = 1.0 / (1.0 + 10 ** ((r_away - r_home - home_advantage) / 400.0))
+        exp_away = 1.0 - exp_home
+
+        # Faktisk score
+        result = row["result"]
+        if result == "H":
+            s_home, s_away = 1.0, 0.0
+        elif result == "A":
+            s_home, s_away = 0.0, 1.0
+        elif result == "D":
+            s_home, s_away = 0.5, 0.5
+        else:
+            # Manglende resultat (f.eks. fremtidig kamp) – ikke oppdater
+            continue
+
+        # Oppdater
+        ratings[(league, home)] = r_home + k_factor * (s_home - exp_home)
+        ratings[(league, away)] = r_away + k_factor * (s_away - exp_away)
+
+    df["home_elo_pre"] = home_elo_pre
+    df["away_elo_pre"] = away_elo_pre
+    df["elo_diff"] = df["home_elo_pre"] - df["away_elo_pre"]
+
+    return df
+
+
 def build_basic_features(df: pd.DataFrame, n_form: int = 5) -> pd.DataFrame:
     """Hovedinngang: legg på alle grunn-features."""
     df = add_team_form_features(df, n=n_form)
     df = add_rest_days_features(df)
+    df = add_elo_features(df)
     return df
