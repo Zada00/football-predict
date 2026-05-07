@@ -1,0 +1,4 @@
+pandas>=2.0
+requests>=2.30
+sqlalchemy>=2.0
+jupyter>=1.0
